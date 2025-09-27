@@ -4,7 +4,6 @@ import logging
 import random
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
-from telegram import ChatPermissions
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
@@ -16,7 +15,7 @@ from telegram.ext import (
 
 from config import CONFIG
 from db import init_db, upsert_user, delete_user, fetch_messages_since, fetch_first_msg_ts_per_user, fetch_last_msg_ts_per_user, user_display_names, add_scheduled_post, db_conn
-from util import requires_auth, owners_only, percentile, timezone_, rules_timezone, localize, get_rules_text, parse_hhmm, escape_md, get_job_queue
+from util import requires_auth, owners_only, percentile, timezone_, rules_timezone, localize, get_rules_text, parse_hhmm, escape_md, get_job_queue, NOTHING_PERMITTED, EVERYTHING_PERMITTED
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -296,7 +295,7 @@ async def active_cmd(update, context):
     except Exception as e:
         log.warning("Could not DM active list to %s: %s", user.id, e)
 
-async def start(update, context):
+async def start(update, _):
     msg = (
         "I'm alive.\n"
         "1) Add me to your group and make me admin with 'ban users'.\n"
@@ -309,12 +308,12 @@ async def start(update, context):
     if update.effective_message:
         await update.effective_message.reply_text(msg)
 
-async def id_cmd(update, context):
+async def id_cmd(update, _):
     chat = update.effective_chat
     if update.effective_message and chat:
         await update.effective_message.reply_text(f"Chat ID: {chat.id}")
 
-async def message_tracker(update, context):
+async def message_tracker(update, _):
     chat = update.effective_chat
     user = update.effective_user
     msg = update.effective_message
@@ -348,7 +347,7 @@ async def new_members(update, context):
     for u in msg.new_chat_members:
         await upsert_user(u, joined_ts=now)
 
-async def left_members(update, context):
+async def left_members(update, _):
     chat = update.effective_chat
     msg = update.effective_message
     if not chat or chat.id != CONFIG["chat_id"]:
@@ -360,9 +359,13 @@ async def left_members(update, context):
     log.info(f"User {user.id} left the chat, removed from DB.")
 
 async def chill(update, context):
+    MAX_MIN = 10080
+    MIN_MIN = 1
+
     chat = update.effective_chat
     user = update.effective_user
     msg = update.effective_message
+    
     if not chat or chat.id != CONFIG["chat_id"] or not user or not msg:
         return
     if not context.args:
@@ -373,38 +376,25 @@ async def chill(update, context):
     except ValueError:
         await msg.reply_text("Usage: /chill <minutes>, e.g. /chill 30")
         return
-    if minutes < 1:
-        minutes = 1
-    MAX_MIN = 10080
+    
+    if minutes < MIN_MIN:
+        minutes = MIN_MIN
     limited = False
     if minutes > MAX_MIN:
         minutes = MAX_MIN
         limited = True
+    
     member = await context.bot.get_chat_member(chat.id, user.id)
     if member.status in ("creator", "administrator"):
         await msg.reply_text("Admins can't self-mute with /chill.")
         return
-    perms = ChatPermissions(
-        can_send_messages=False,
-        can_send_audios=False,
-        can_send_documents=False,
-        can_send_photos=False,
-        can_send_videos=False,
-        can_send_video_notes=False,
-        can_send_voice_notes=False,
-        can_send_polls=False,
-        can_add_web_page_previews=False,
-        can_change_info=False,
-        can_invite_users=False,
-        can_pin_messages=False,
-        can_manage_topics=False,
-    )
+
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     try:
         await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=user.id,
-            permissions=perms,
+            permissions=NOTHING_PERMITTED,
             until_date=until,
         )
         limit_note = " (limited to 10080 min)" if limited else ""
@@ -470,27 +460,13 @@ async def mute_cmd(update, context):
         log.error(f"Ошибка при проверке статуса пользователя {target_user.id}: {e}")
         await msg.reply_text("Не удалось проверить статус пользователя.")
         return
-    perms = ChatPermissions(
-        can_send_messages=False,
-        can_send_audios=False,
-        can_send_documents=False,
-        can_send_photos=False,
-        can_send_videos=False,
-        can_send_video_notes=False,
-        can_send_voice_notes=False,
-        can_send_polls=False,
-        can_add_web_page_previews=False,
-        can_change_info=False,
-        can_invite_users=False,
-        can_pin_messages=False,
-        can_manage_topics=False,
-    )
+    
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     try:
         await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=target_user.id,
-            permissions=perms,
+            permissions=NOTHING_PERMITTED,
             until_date=until,
         )
         name = target_user.full_name or (f"@{target_user.username}" if target_user.username else str(target_user.id))
@@ -542,26 +518,13 @@ async def unmute_cmd(update, context):
         log.error(f"Ошибка при проверке статуса пользователя {target_user.id}: {e}")
         await msg.reply_text("Не удалось проверить статус пользователя.")
         return
-    perms = ChatPermissions(
-        can_send_messages=True,
-        can_send_audios=True,
-        can_send_documents=True,
-        can_send_photos=True,
-        can_send_videos=True,
-        can_send_video_notes=True,
-        can_send_voice_notes=True,
-        can_send_polls=True,
-        can_add_web_page_previews=True,
-        can_change_info=True,
-        can_invite_users=True,
-        can_pin_messages=True,
-        can_manage_topics=True,
-    )
+
+
     try:
         await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=target_user.id,
-            permissions=perms,
+            permissions=EVERYTHING_PERMITTED,
             until_date=0,
         )
         name = target_user.full_name or (f"@{target_user.username}" if target_user.username else str(target_user.id))
@@ -689,7 +652,7 @@ async def schedule_cancel(update, context):
     return ConversationHandler.END
 
 @requires_auth
-async def schedule_list(update, context):
+async def schedule_list(update, _):
     msg = update.effective_message
     tz = timezone_()
     # TODO make function, place in db.py

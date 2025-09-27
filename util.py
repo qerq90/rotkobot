@@ -2,7 +2,8 @@ import os
 import re
 from config import CONFIG
 from zoneinfo import ZoneInfo
-from datetime import datetime
+from datetime import datetime, timezone
+from telegram import ChatPermissions
 
 def get_job_queue(app):
     jq = getattr(app, "job_queue", None)
@@ -34,6 +35,42 @@ def percentile(p, values):
     d1 = values[c] * (k - f)
     return float(d0 + d1)
 
+#############
+# VARIABLES #
+#############
+
+EVERYTHING_PERMITTED = ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_add_web_page_previews=True,
+        can_change_info=True,
+        can_invite_users=True,
+        can_pin_messages=True,
+        can_manage_topics=True,
+    )
+
+NOTHING_PERMITTED = ChatPermissions(
+        can_send_messages=False,
+        can_send_audios=False,
+        can_send_documents=False,
+        can_send_photos=False,
+        can_send_videos=False,
+        can_send_video_notes=False,
+        can_send_voice_notes=False,
+        can_send_polls=False,
+        can_add_web_page_previews=False,
+        can_change_info=False,
+        can_invite_users=False,
+        can_pin_messages=False,
+        can_manage_topics=False,
+)
+
 ############
 # TIMEZONE #
 ############
@@ -63,6 +100,7 @@ def timezone_():
 ##############
 # OWNER AUTH #
 ##############
+
 def owners_only(func):
     async def wrapper(update, context, *args, **kwargs):
         u = update.effective_user
@@ -80,6 +118,7 @@ def metrics_owners():
 #############
 # AUTH FUNC #
 #############
+
 def requires_auth(func):
     async def wrapper(update, context, *args, **kwargs):
         channel_id = CONFIG.get("channel_id")
