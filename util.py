@@ -54,7 +54,7 @@ def rules_timezone():
     except Exception:
         return ZoneInfo("UTC")
 
-def timezone():
+def timezone_():
     try:
         return ZoneInfo(CONFIG.get("tz", "UTC"))
     except Exception:

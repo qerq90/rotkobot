@@ -2,7 +2,8 @@ import time
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta, timezone, time as dtime
+from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
 from telegram import ChatPermissions
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -15,7 +16,7 @@ from telegram.ext import (
 
 from config import CONFIG
 from db import init_db, upsert_user, delete_user, fetch_messages_since, fetch_first_msg_ts_per_user, fetch_last_msg_ts_per_user, user_display_names, add_scheduled_post, db_conn
-from util import requires_auth, owners_only, percentile, timezone, rules_timezone, localize, get_rules_text, parse_hhmm, escape_md, get_job_queue
+from util import requires_auth, owners_only, percentile, timezone_, rules_timezone, localize, get_rules_text, parse_hhmm, escape_md, get_job_queue
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -24,7 +25,7 @@ logging.basicConfig(
 log = logging.getLogger("rothko-bot")
 
 async def metrics_summary(days = 7):
-    tz = timezone()
+    tz = timezone_()
     now = int(time.time())
     start = now - days * 86400
     prev_start = start - days * 86400
@@ -89,7 +90,7 @@ async def metrics_summary(days = 7):
     return "\n".join(lines)
 
 async def _heatmap_text(days = 30):
-    tz = timezone()
+    tz = timezone_()
     now = int(time.time())
     start = now - days * 86400
     rows = await fetch_messages_since(start)
@@ -126,7 +127,7 @@ async def _leaders_text(days = 30):
     return "\n".join(lines)
 
 async def _streaks_text():
-    tz = timezone()
+    tz = timezone_()
     now = int(time.time())
     start = now - 365*86400
     rows = await fetch_messages_since(start)
@@ -650,7 +651,7 @@ async def schedule_collect_photo(update, context):
         await msg.reply_text(f"Saved {len(photos)}/8. Keep them coming…")
         return SCHED_PHOTOS
     target_date = context.user_data["schedule_date"]
-    tz = timezone()
+    tz = timezone_()
     start_local = datetime.combine(target_date, dtime(hour=12, minute=30), tz)
     scheduled_times_local = [start_local + timedelta(minutes=90 * i) for i in range(8)]
     jitter = int(CONFIG.get("schedule_jitter_min", 15))
@@ -690,7 +691,7 @@ async def schedule_cancel(update, context):
 @requires_auth
 async def schedule_list(update, context):
     msg = update.effective_message
-    tz = timezone()
+    tz = timezone_()
     # TODO make function, place in db.py
     async with db_conn() as db:
         cur = await db.execute(
@@ -818,7 +819,7 @@ async def inactive_cmd(update, context):
     start_idx = offset + 1
     end_idx = min(offset + len(paginated_users), total_active)
     lines = [f"Неактивные (≥{days}д с 2 сентября 2025) — режим: по сообщениям\nНайдено: {total_active} — показываю {start_idx}–{end_idx}"]
-    tz = timezone()
+    tz = timezone_()
     for row in paginated_users:
         if row["last_msg_ts"] is not None:
             ts = row["last_msg_ts"]
@@ -869,23 +870,6 @@ async def _reload_scheduled_posts(app):
             data={"id": row["id"]},
             name=f"post-{row['id']}",
         )
-
-async def sync_chat_members(context):
-    chat_id = CONFIG.get("chat_id")
-    if not chat_id:
-        log.warning("Cannot sync chat members: chat_id not configured")
-        return
-    try:
-        async for member in context.bot.get_chat_members(chat_id):
-            user = member.user
-            if user.is_bot:
-                continue
-            now = int(time.time())
-            reference_date = int(datetime(2025, 9, 2, tzinfo=timezone.utc).timestamp())
-            await upsert_user(user, joined_ts=reference_date)
-            log.info(f"Synced user {user.id} with joined_ts=2 Sep 2025")
-    except Exception as e:
-        log.error(f"Failed to sync chat members: {e}")
 
 @owners_only
 async def allmembers_cmd(update, context):
@@ -1039,7 +1023,6 @@ async def on_startup(app: Application):
         log.error("JobQueue not available, cannot schedule jobs")
         return
     await _reload_scheduled_posts(app)
-    await sync_chat_members(app)  # Add this line
     hh, mm = parse_hhmm(CONFIG.get("rules_time", "06:00"))
     jq.run_daily(
         post_and_pin_rules,
