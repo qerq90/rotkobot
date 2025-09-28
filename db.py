@@ -124,3 +124,32 @@ async def add_scheduled_post(file_id, run_at_utc, channel_id):
         )
         await db.commit()
         return cur.lastrowid
+
+async def fetch_active_users(chat_id, threshold, page_size, offset):
+    async with db_conn() as db:
+        # Fetch active users (with messages in the last 7 days)
+        cur = await db.execute("""
+            SELECT DISTINCT a.user_id, a.username, a.first_name, a.last_name
+            FROM activity a
+            JOIN messages m ON a.user_id = m.user_id
+            WHERE m.chat_id = ? AND m.ts >= ? AND a.is_bot = 0
+            ORDER BY a.user_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (chat_id, threshold, page_size, offset),
+        )
+        rows = await cur.fetchall()
+        # Count total active users for pagination info
+        cur = await db.execute(
+                """
+                SELECT COUNT(DISTINCT a.user_id) as total
+                FROM activity a
+                JOIN messages m ON a.user_id = m.user_id
+                WHERE m.chat_id = ? AND m.ts >= ? AND a.is_bot = 0
+                """,
+                (chat_id, threshold),
+        )
+        total_row = await cur.fetchone()
+        total_active = total_row["total"] if total_row else 0
+        
+        return (rows, total_active)

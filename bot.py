@@ -14,8 +14,8 @@ from telegram.ext import (
 )
 
 from config import CONFIG
-from db import init_db, upsert_user, delete_user, fetch_messages_since, fetch_first_msg_ts_per_user, fetch_last_msg_ts_per_user, user_display_names, add_scheduled_post, db_conn
-from util import requires_auth, owners_only, percentile, timezone_, rules_timezone, localize, get_rules_text, parse_hhmm, escape_md, get_job_queue, NOTHING_PERMITTED, EVERYTHING_PERMITTED
+from db import init_db, upsert_user, delete_user, fetch_messages_since, fetch_first_msg_ts_per_user, fetch_last_msg_ts_per_user, user_display_names, add_scheduled_post, fetch_active_users, db_conn
+from util import requires_auth, owners_only, percentile, timezone_, rules_timezone, localize, get_rules_text, parse_hhmm, escape_md, get_job_queue, NOTHING_PERMITTED, EVERYTHING_PERMITTED, months_ru
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -244,33 +244,9 @@ async def active_cmd(update, context):
     threshold = now - days * 86400
     page_size = 50
     offset = (page - 1) * page_size
-    # TODO make function out of this and place it in db.py
-    async with db_conn() as db:
-        # Fetch active users (with messages in the last 7 days)
-        cur = await db.execute(
-            """
-            SELECT DISTINCT a.user_id, a.username, a.first_name, a.last_name
-            FROM activity a
-            JOIN messages m ON a.user_id = m.user_id
-            WHERE m.chat_id = ? AND m.ts >= ? AND a.is_bot = 0
-            ORDER BY a.user_id ASC
-            LIMIT ? OFFSET ?
-            """,
-            (chat_id, threshold, page_size, offset),
-        )
-        rows = await cur.fetchall()
-        # Count total active users for pagination info
-        cur = await db.execute(
-            """
-            SELECT COUNT(DISTINCT a.user_id) as total
-            FROM activity a
-            JOIN messages m ON a.user_id = m.user_id
-            WHERE m.chat_id = ? AND m.ts >= ? AND a.is_bot = 0
-            """,
-            (chat_id, threshold),
-        )
-        total_row = await cur.fetchone()
-        total_active = total_row["total"] if total_row else 0
+
+    rows, total_active = fetch_active_users(chat_id, threshold, page_size, offset)
+        
     if not rows:
         await context.bot.send_message(user.id, f"Нет активных пользователей за последние {days} дней на странице {page}.")
         return
@@ -278,7 +254,7 @@ async def active_cmd(update, context):
     active_users = []
     for row in rows:
         status = await check_chat_member_status(context, chat_id, row["user_id"])
-        await asyncio.sleep(0.1)  # Respect Telegram API rate limits
+        await asyncio.sleep(0.1)  # Respect Telegram API rate limits # lol
         if status not in ("left", "kicked"):
             active_users.append(row)
     # Apply pagination display
@@ -411,7 +387,6 @@ async def mute_cmd(update, context):
     chat = update.effective_chat
     msg = update.effective_message
     actor = update.effective_user
-    log.debug(f"Received /mute from user {actor.id if actor else None} in chat {chat.id if chat else None}")
     if not chat or chat.id != CONFIG.get("chat_id"):
         await msg.reply_text("Эта команда работает только в указанном чате.")
         return
@@ -695,21 +670,6 @@ async def rules_now(update, context):
     await post_and_pin_rules(context)
     if update.effective_message:
         await update.effective_message.reply_text("Rules posted (and pinned if possible).")
-
-months_ru = {
-    'January': 'января',
-    'February': 'февраля',
-    'March': 'марта',
-    'April': 'апреля',
-    'May': 'мая',
-    'June': 'июня',
-    'July': 'июля',
-    'August': 'августа',
-    'September': 'сентября',
-    'October': 'октября',
-    'November': 'ноября',
-    'December': 'декабря',
-}
 
 async def check_chat_member_status(context, chat_id, user_id):
     """Проверяет статус пользователя в чате через Telegram API."""
