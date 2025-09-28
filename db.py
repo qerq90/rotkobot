@@ -80,6 +80,13 @@ async def delete_user(user_id):
         await db.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
         await db.commit()
 
+async def insert_message(chat, msg, user, now, reply_to, thread_id):
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO messages(chat_id, message_id, user_id, ts, reply_to_message_id, thread_id) VALUES (?,?,?,?,?,?)",
+            (chat.id, msg.message_id, user.id, now, reply_to, thread_id),
+        )
+        await db.commit()
 
 async def fetch_messages_since(since_ts, chat_id):
     async with db_conn() as db:
@@ -125,6 +132,33 @@ async def add_scheduled_post(file_id, run_at_utc, channel_id):
         await db.commit()
         return cur.lastrowid
 
+async def fetch_all_users(page_size, offset):
+    async with db_conn() as db:
+        cur = await db.execute(
+            """
+            SELECT user_id, username, first_name, last_name
+            FROM activity
+            WHERE is_bot = 0
+            ORDER BY user_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (page_size, offset),
+        )
+        rows = await cur.fetchall()
+        # Count total users for pagination info
+        cur = await db.execute(
+            """
+            SELECT COUNT(user_id) as total
+            FROM activity
+            WHERE is_bot = 0
+            """,
+        )
+        
+        total_row = await cur.fetchone()
+        total_users = total_row["total"] if total_row else 0
+        
+        return (rows, total_users)
+
 async def fetch_active_users(chat_id, threshold, page_size, offset):
     async with db_conn() as db:
         # Fetch active users (with messages in the last 7 days)
@@ -153,3 +187,68 @@ async def fetch_active_users(chat_id, threshold, page_size, offset):
         total_active = total_row["total"] if total_row else 0
         
         return (rows, total_active)
+
+async def fetch_inactive_users(chat_id, threshold, page_size, offset):
+    async with db_conn() as db:
+        # Fetch users who have no messages in the last 7 days or no messages at all
+        cur = await db.execute(
+            """
+            SELECT a.user_id, a.username, a.first_name, a.last_name
+            FROM activity a
+            LEFT JOIN messages m ON a.user_id = m.user_id AND m.chat_id = ? AND m.ts >= ?
+            WHERE a.is_bot = 0 AND (m.user_id IS NULL OR m.ts IS NULL)
+            ORDER BY a.user_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (chat_id, threshold, page_size, offset),
+        )
+        rows = await cur.fetchall()
+        # Count total silent users for pagination info
+        cur = await db.execute(
+            """
+            SELECT COUNT(DISTINCT a.user_id) as total
+            FROM activity a
+            LEFT JOIN messages m ON a.user_id = m.user_id AND m.chat_id = ? AND m.ts >= ?
+            WHERE a.is_bot = 0 AND (m.user_id IS NULL OR m.ts IS NULL)
+            """,
+            (chat_id, threshold),
+        )
+        total_row = await cur.fetchone()
+        total_silent = total_row["total"] if total_row else 0
+        
+        return rows, total_silent
+
+async def fetch_scheduled_posts(channel_id):
+    async with db_conn() as db:
+        cur = await db.execute(
+            "SELECT id, run_at_ts FROM scheduled_posts WHERE status='pending' AND channel_id=? ORDER BY run_at_ts ASC",
+            (channel_id,),
+        )
+
+        return await cur.fetchall() 
+
+async def fetch_all_scheduled_posts():
+    async with db_conn() as db:
+        cur = await db.execute(
+            "SELECT id, run_at_ts FROM scheduled_posts WHERE status='pending'",
+        )
+        return await cur.fetchall()
+
+async def fetch_inactive_users(threshold, reference_date):
+    async with db_conn() as db:
+        # Fetch all potential inactive users
+        cur = await db.execute(
+            """
+            SELECT user_id, username, first_name, last_name, last_msg_ts, joined_ts 
+            FROM activity 
+            WHERE is_bot=0 
+            AND (
+                (last_msg_ts IS NOT NULL AND last_msg_ts < ?) 
+                OR (last_msg_ts IS NULL AND COALESCE(joined_ts, ?) < ?)
+            ) 
+            ORDER BY COALESCE(last_msg_ts, joined_ts, ?) ASC
+            """,
+            (threshold, reference_date, threshold, reference_date),
+        )
+        
+        return await cur.fetchall()

@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 
 from config import CONFIG
-from db import init_db, upsert_user, delete_user, fetch_messages_since, fetch_first_msg_ts_per_user, fetch_last_msg_ts_per_user, user_display_names, add_scheduled_post, fetch_active_users, db_conn
+from db import init_db, upsert_user, delete_user, fetch_messages_since, fetch_first_msg_ts_per_user, fetch_last_msg_ts_per_user, user_display_names, add_scheduled_post, fetch_all_users, fetch_active_users, insert_message, fetch_scheduled_posts, fetch_inactive_users, fetch_all_scheduled_posts, db_conn
 from util import requires_auth, owners_only, percentile, timezone_, rules_timezone, localize, get_rules_text, parse_hhmm, escape_md, get_job_queue, NOTHING_PERMITTED, EVERYTHING_PERMITTED, months_ru
 
 logging.basicConfig(
@@ -245,7 +245,7 @@ async def active_cmd(update, context):
     page_size = 50
     offset = (page - 1) * page_size
 
-    rows, total_active = fetch_active_users(chat_id, threshold, page_size, offset)
+    rows, total_active = await fetch_active_users(chat_id, threshold, page_size, offset)
         
     if not rows:
         await context.bot.send_message(user.id, f"Нет активных пользователей за последние {days} дней на странице {page}.")
@@ -302,17 +302,11 @@ async def message_tracker(update, _):
     reply_to = msg.reply_to_message.message_id if getattr(msg, "reply_to_message", None) else None
     thread_id = getattr(msg, "message_thread_id", None)
     try:
-        # TODO make function out if this and place it in db.py
-        async with db_conn() as db:
-            await db.execute(
-                "INSERT OR IGNORE INTO messages(chat_id, message_id, user_id, ts, reply_to_message_id, thread_id) VALUES (?,?,?,?,?,?)",
-                (chat.id, msg.message_id, user.id, now, reply_to, thread_id),
-            )
-            await db.commit()
+        await insert_message(chat.id, msg.message_id, user.id, now, reply_to, thread_id)
     except Exception as e:
         log.warning("Failed to log message analytics: %s", e)
 
-async def new_members(update, context):
+async def new_members(update, _):
     chat = update.effective_chat
     msg = update.effective_message
     if not chat or chat.id != CONFIG["chat_id"]:
@@ -630,13 +624,8 @@ async def schedule_cancel(update, context):
 async def schedule_list(update, _):
     msg = update.effective_message
     tz = timezone_()
-    # TODO make function, place in db.py
-    async with db_conn() as db:
-        cur = await db.execute(
-            "SELECT id, run_at_ts FROM scheduled_posts WHERE status='pending' AND channel_id=? ORDER BY run_at_ts ASC",
-            (CONFIG.get("channel_id"),),
-        )
-        rows = await cur.fetchall()
+
+    rows = await fetch_scheduled_posts(CONFIG.get("channel_id"))
     if not rows:
         await msg.reply_text("No pending scheduled posts.")
         return
@@ -705,23 +694,8 @@ async def inactive_cmd(update, context):
     threshold = now - days * 86400
     page_size = 50
     offset = (page - 1) * page_size
-    # TODO make function, place in db.py
-    async with db_conn() as db:
-        # Fetch all potential inactive users
-        cur = await db.execute(
-            """
-            SELECT user_id, username, first_name, last_name, last_msg_ts, joined_ts 
-            FROM activity 
-            WHERE is_bot=0 
-            AND (
-                (last_msg_ts IS NOT NULL AND last_msg_ts < ?) 
-                OR (last_msg_ts IS NULL AND COALESCE(joined_ts, ?) < ?)
-            ) 
-            ORDER BY COALESCE(last_msg_ts, joined_ts, ?) ASC
-            """,
-            (threshold, reference_date, threshold, reference_date),
-        )
-        rows = await cur.fetchall()
+
+    rows = await fetch_inactive_users(threshold, reference_date)
     if not rows:
         await context.bot.send_message(user.id, f"Нет неактивных пользователей (≥{days}д без сообщений) на странице {page}.")
         return
@@ -772,17 +746,14 @@ async def inactive_cmd(update, context):
         log.warning("Could not DM inactive list to %s: %s", user.id, e)
 
 async def _reload_scheduled_posts(app):
-    # TODO make function, place in db.py
-    async with db_conn() as db:
-        cur = await db.execute(
-            "SELECT id, run_at_ts FROM scheduled_posts WHERE status='pending'",
-        )
-        rows = await cur.fetchall()
+    
     now_utc = datetime.now(timezone.utc)
     jq = get_job_queue(app)
     if jq is None:
         log.error("Cannot reschedule posts: JobQueue missing.")
         return
+    
+    rows = await fetch_all_scheduled_posts()
     for row in rows:
         run_at_utc = datetime.fromtimestamp(row["run_at_ts"], tz=timezone.utc)
         if run_at_utc <= now_utc:
@@ -813,33 +784,13 @@ async def allmembers_cmd(update, context):
             return
     page_size = 50
     offset = (page - 1) * page_size
+
     # Fetch all users from activity table
-    # TODO make function, place in db.py
-    async with db_conn() as db:
-        cur = await db.execute(
-            """
-            SELECT user_id, username, first_name, last_name
-            FROM activity
-            WHERE is_bot = 0
-            ORDER BY user_id ASC
-            LIMIT ? OFFSET ?
-            """,
-            (page_size, offset),
-        )
-        rows = await cur.fetchall()
-        # Count total users for pagination info
-        cur = await db.execute(
-            """
-            SELECT COUNT(user_id) as total
-            FROM activity
-            WHERE is_bot = 0
-            """,
-        )
-        total_row = await cur.fetchone()
-        total_users = total_row["total"] if total_row else 0
+    rows, total_users = await fetch_all_users(page_size, offset)
     if not rows:
         await context.bot.send_message(user.id, f"Нет пользователей на странице {page}.")
         return
+    
     # Filter users who are still in chat
     active_users = []
     for row in rows:
@@ -847,6 +798,7 @@ async def allmembers_cmd(update, context):
         await asyncio.sleep(0.1)  # Respect Telegram API rate limits
         if status not in ("left", "kicked"):
             active_users.append(row)
+    
     # Apply pagination display
     start_idx = offset + 1
     end_idx = min(offset + len(active_users), total_users)
@@ -878,41 +830,18 @@ async def silent_cmd(update, context):
         except ValueError:
             await context.bot.send_message(user.id, "Usage: /silent [page]\nExample: /silent 2 for page 2")
             return
+    
     now = int(time.time())
     days = 7
     threshold = now - days * 86400
     page_size = 50
     offset = (page - 1) * page_size
-    # TODO make function, place in db.py
-    async with db_conn() as db:
-        # Fetch users who have no messages in the last 7 days or no messages at all
-        cur = await db.execute(
-            """
-            SELECT a.user_id, a.username, a.first_name, a.last_name
-            FROM activity a
-            LEFT JOIN messages m ON a.user_id = m.user_id AND m.chat_id = ? AND m.ts >= ?
-            WHERE a.is_bot = 0 AND (m.user_id IS NULL OR m.ts IS NULL)
-            ORDER BY a.user_id ASC
-            LIMIT ? OFFSET ?
-            """,
-            (chat_id, threshold, page_size, offset),
-        )
-        rows = await cur.fetchall()
-        # Count total silent users for pagination info
-        cur = await db.execute(
-            """
-            SELECT COUNT(DISTINCT a.user_id) as total
-            FROM activity a
-            LEFT JOIN messages m ON a.user_id = m.user_id AND m.chat_id = ? AND m.ts >= ?
-            WHERE a.is_bot = 0 AND (m.user_id IS NULL OR m.ts IS NULL)
-            """,
-            (chat_id, threshold),
-        )
-        total_row = await cur.fetchone()
-        total_silent = total_row["total"] if total_row else 0
+
+    rows, total_silent = await fetch_inactive_users(chat_id, threshold, page_size, offset),
     if not rows:
         await context.bot.send_message(user.id, f"Нет неактивных пользователей за последние {days} дней на странице {page}.")
         return
+    
     # Filter users who are still in chat
     silent_users = []
     for row in rows:
@@ -920,6 +849,7 @@ async def silent_cmd(update, context):
         await asyncio.sleep(0.1)  # Respect Telegram API rate limits
         if status not in ("left", "kicked"):
             silent_users.append(row)
+    
     # Apply pagination display
     start_idx = offset + 1
     end_idx = min(offset + len(silent_users), total_silent)
