@@ -252,3 +252,18 @@ async def fetch_inactive_users(threshold, reference_date):
         )
         
         return await cur.fetchall()
+
+async def fetch_scheduled_post(post_id):
+    async with db_conn() as db:
+        cur = await db.execute("SELECT * FROM scheduled_posts WHERE id=?", (sched_id,))
+        row = await cur.fetchone()
+        
+        return row
+
+async def change_scheduled_post_status(post_id, status, updated_ts):
+    async with db_conn() as db:
+            await db.execute(
+                "UPDATE scheduled_posts SET status=?, sent_ts=? WHERE id=?",
+                (status, updated_ts, post_id),
+            )
+            await db.commit()

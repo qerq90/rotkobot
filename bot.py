@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 
 from config import CONFIG
-from db import init_db, upsert_user, delete_user, fetch_messages_since, fetch_first_msg_ts_per_user, fetch_last_msg_ts_per_user, user_display_names, add_scheduled_post, fetch_all_users, fetch_active_users, insert_message, fetch_scheduled_posts, fetch_inactive_users, fetch_all_scheduled_posts, db_conn
+from db import init_db, upsert_user, delete_user, fetch_messages_since, fetch_first_msg_ts_per_user, fetch_last_msg_ts_per_user, user_display_names, add_scheduled_post, fetch_all_users, fetch_active_users, insert_message, fetch_scheduled_posts, fetch_inactive_users, fetch_all_scheduled_posts,  fetch_scheduled_post, change_scheduled_post_status
 from util import requires_auth, owners_only, percentile, timezone_, rules_timezone, localize, get_rules_text, parse_hhmm, escape_md, get_job_queue, NOTHING_PERMITTED, EVERYTHING_PERMITTED, months_ru
 
 logging.basicConfig(
@@ -504,15 +504,13 @@ async def unmute_cmd(update, context):
 
 SCHED_PHOTOS = 1
 
-# TODO refactor this function. Maybe even rewrite
 async def post_photo_job(context):
     data = context.job.data or {}
     sched_id = data.get("id")
     if not sched_id:
         return
-    async with db_conn() as db:
-        cur = await db.execute("SELECT * FROM scheduled_posts WHERE id=?", (sched_id,))
-        row = await cur.fetchone()
+    # get scheduled_post
+    row = await fetch_scheduled_post(sched_id)
     if not row or row["status"] != "pending":
         return
     try:
@@ -521,20 +519,12 @@ async def post_photo_job(context):
             photo=row["file_id"],
             caption=row["caption"] or None,
         )
-        async with db_conn() as db:
-            await db.execute(
-                "UPDATE scheduled_posts SET status='sent', sent_ts=? WHERE id=?",
-                (int(time.time()), sched_id),
-            )
-            await db.commit()
+
+        #set post as sent 
+        await change_scheduled_post_status(sched_id, "sent", int(time.time())),
         log.info("Posted scheduled photo id=%s", sched_id)
     except Exception as e:
-        async with db_conn() as db:
-            await db.execute(
-                "UPDATE scheduled_posts SET status='failed' WHERE id=?",
-                (sched_id,),
-            )
-            await db.commit()
+        await change_scheduled_post_status(sched_id, "failed", int(time.time())),
         log.error("Failed to post scheduled photo id=%s: %s", sched_id, e)
 
 @requires_auth
