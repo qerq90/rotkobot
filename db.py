@@ -255,7 +255,7 @@ async def fetch_inactive_users(threshold, reference_date):
 
 async def fetch_scheduled_post(post_id):
     async with db_conn() as db:
-        cur = await db.execute("SELECT * FROM scheduled_posts WHERE id=?", (sched_id,))
+        cur = await db.execute("SELECT * FROM scheduled_posts WHERE id=?", (post_id,))
         row = await cur.fetchone()
         
         return row
